@@ -1,0 +1,31 @@
+name: backfill
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "시작일 (YYYYMMDD)"
+        default: "20080101"
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: 과거 데이터 수집
+        env:
+          KRX_ID: ${{ secrets.KRX_ID }}
+          KRX_PW: ${{ secrets.KRX_PW }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python run_backfill.py "${{ inputs.start }}"
+      - name: 저장
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add data
+          git commit -m "backfill from ${{ inputs.start }}" || echo "변경 없음"
+          git push
