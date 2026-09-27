@@ -13,7 +13,7 @@ REQUIRED = {
     "kofia_funds.csv": ["deposits", "credit", "forced"],
 }
 FRESH_DAYS = {"kospi_index.csv": 5, "kospi_valuation.csv": 5, "kofia_funds.csv": 7,
-              "krx_investor.csv": 5, "kospi_investor_naver.csv": 5}
+              "krx_investor.csv": 5}
 
 
 def check() -> list[str]:
