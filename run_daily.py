@@ -5,7 +5,7 @@ import sys
 import traceback
 
 from checks import check
-from collectors import kofia, krx, naver
+from collectors import kofia, krx
 from notify.telegram import send
 
 FAIL = []
@@ -22,7 +22,6 @@ def step(name, fn):
 
 if __name__ == "__main__":
     step("KRX", lambda: krx.run())
-    step("네이버", lambda: naver.run())
     step("금투협", lambda: kofia.run())
     problems = check()
     if FAIL or problems:
