@@ -1,8 +1,14 @@
-"""수집된 CSV를 합쳐 주간 지수와 매매 신호를 계산한다.
+"""수집된 CSV를 합쳐 지수와 주문을 만든다.
+
+체결 규칙: 월요일 마감 신호 → 화요일 종가 매매 (매수 시점 통일)
+  월요일 저녁  : 주문 안내 (기준금액의 몇 % 매수 / 보유금액의 몇 % 매도)
+  화요일 저녁  : 체결된 것으로 보고 보유 비중 갱신
+  그 외 요일   : 지수만 참고용으로 통지
 
 출력
-  data/weekly_index.csv  주차별 지수·구성요소·가드·포지션
-  data/latest_signal.json 최신 주차 요약 (알림용)
+  data/daily_index.csv     일별 지수·구성요소·목표비중
+  data/position.json       현재 보유 비중과 대기 주문
+  data/latest_signal.json  최신 신호 요약
 """
 from __future__ import annotations
 
@@ -11,82 +17,89 @@ import json
 import pandas as pd
 
 from collectors.common import DATA, load_csv, log
-from index.model import compute_index, backtest, stats
+from index.model import compute_index, backtest, stats, make_order, P
+
+STATE = DATA / "position.json"
 
 
 def build_daily() -> pd.DataFrame:
-    """일별 입력 데이터 구성. 금액 단위는 원으로 통일."""
     idx = load_csv("kospi_index.csv")
     if idx.empty:
         raise RuntimeError("kospi_index.csv 가 없습니다. 먼저 수집을 실행하세요.")
     d = pd.DataFrame({"close": idx["close"], "value": idx["value"]})
     if "mcap" in idx:
         d["mcap"] = idx["mcap"]
-
     inv = load_csv("krx_investor.csv")
     if not inv.empty:
         d = d.join(inv[["foreign", "inst", "indiv"]])
-    else:                                            # KRX 실패 시 네이버(억원) 사용
-        nv = load_csv("kospi_investor_naver.csv")
-        if not nv.empty:
-            d = d.join((nv[["외국인", "기관계", "개인"]] * 1e8)
-                       .rename(columns={"외국인": "foreign", "기관계": "inst", "개인": "indiv"}))
-            log.warning("KRX 수급 데이터가 없어 네이버 데이터를 사용했습니다.")
-
-    k = load_csv("kofia_funds.csv")
-    if k.empty:
-        raise RuntimeError("kofia_funds.csv 가 없습니다. 예탁금·신용 데이터가 있어야 지수를 계산합니다.")
-    d = d.join(k[["deposits", "credit", "forced"]] * 1e6)
-
     val = load_csv("kospi_valuation.csv")
-    if not val.empty:                                # PBR 은 v3 에서 점수에 반영 예정
+    if not val.empty:
         d = d.join(val[["pbr", "per"]])
-
-    d = d.dropna(subset=["close", "value", "deposits", "credit", "forced"])
-    log.info("입력 데이터 %d행 (%s ~ %s)", len(d), d.index[0].date(), d.index[-1].date())
+    k = load_csv("kofia_funds.csv")
+    if not k.empty:
+        d = d.join(k[["deposits", "credit", "forced"]] * 1e6)
+    fx = load_csv("fx_usdkrw.csv")
+    if not fx.empty:
+        d["usdkrw"] = fx["usdkrw"].reindex(d.index).ffill(limit=5)
+    d = d.dropna(subset=["close", "value"])
+    log.info("입력 %d행 (%s ~ %s)", len(d), d.index[0].date(), d.index[-1].date())
     return d
 
 
-def run() -> dict:
+def _state() -> dict:
+    if STATE.exists():
+        return json.loads(STATE.read_text(encoding="utf-8"))
+    return {"코스피비중": 0.0, "레버리지비중": 0.0, "대기주문": None}
+
+
+def run(today: pd.Timestamp | None = None) -> dict:
     daily = build_daily()
     idx = compute_index(daily)
-    if "pbr" in daily:
-        idx["pbr"] = daily["pbr"].resample("W-FRI").last().reindex(idx.index)
-        win = min(len(idx), 520)
-        idx["pbr_pct"] = (idx["pbr"].rolling(win, min_periods=104)
-                          .rank(pct=True).round(2))
-    idx.to_csv(DATA / "weekly_index.csv", encoding="utf-8-sig")
+    idx.to_csv(DATA / "daily_index.csv", encoding="utf-8-sig")
 
-    ret, held, trades = backtest(daily, idx)
-    start = idx.dropna(subset=["포지션"])["last_date"].iloc[0]
-    perf = {"전략": stats(ret[start:], held[start:]),
-            "단순보유": stats(daily["close"].pct_change().fillna(0)[start:])}
+    start = idx["코스피비중"].dropna().index[0]
+    perf = {}
+    ret, held = backtest(daily, idx, column="코스피비중")
+    perf["코스피 1배"] = {k: round(float(v), 3) for k, v in stats(ret[start:], held[start:]).items()}
+    bh = daily["close"].pct_change().fillna(0)
+    perf["단순보유"] = {k: round(float(v), 3) for k, v in stats(bh[start:]).items()}
 
-    cur = idx.dropna(subset=["포지션"]).iloc[-1]
-    prev = idx.dropna(subset=["포지션"]).iloc[-2] if len(idx.dropna(subset=["포지션"])) > 1 else cur
-    if cur["포지션"] == 1 and prev["포지션"] == 0:
-        signal = "신규 매수"
-    elif cur["포지션"] == 1:
-        signal = "보유 유지"
-    elif prev["포지션"] == 1:
-        signal = "청산"
-    else:
-        signal = "관망"
+    cur = idx.dropna(subset=["코스피비중"]).iloc[-1]
+    sig_date = idx.dropna(subset=["코스피비중"]).index[-1]
+    today = today or pd.Timestamp.today().normalize()
+    st = _state()
+
+    # 화요일이면 전날(월) 주문이 오늘 종가에 체결된 것으로 처리
+    if today.dayofweek == 1 and st.get("대기주문"):
+        st["코스피비중"] = st["대기주문"]["목표비중"]
+        st["레버리지비중"] = st["대기주문"].get("레버리지목표", st.get("레버리지비중", 0.0))
+        st["대기주문"] = None
+
+    order = None
+    if today.dayofweek == 0:                       # 월요일 저녁: 내일 화요일 종가 주문
+        order = make_order(float(cur["코스피비중"]), float(st["코스피비중"]))
+        order["레버리지목표"] = float(cur["레버리지비중"])
+        st["대기주문"] = None if order["동작"] in ("유지", "관망") else order
+
+    STATE.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    comp = [c for c in ["기관수급", "외인수급", "신용부담", "증시연료", "패닉", "밸류", "환율"] if c in idx.columns]
     out = {
-        "기준일": str(pd.Timestamp(cur["last_date"]).date()),
+        "기준일": str(sig_date.date()),
         "종가": round(float(cur["close"]), 2),
         "지수": float(cur["index"]),
-        "신호": signal,
-        "가드": ("가격" if cur["가드_가격"] else "") + ("수급" if cur["가드_수급"] else "") or "없음",
-        "구성": {k: float(cur[k]) for k in ["신용과열", "패닉", "연료", "반대매매", "수급"] if k in idx.columns and pd.notna(cur[k])},
-        "PBR": None if "pbr" not in idx.columns or pd.isna(cur.get("pbr")) else float(cur["pbr"]),
-        "PBR백분위": None if "pbr_pct" not in idx.columns or pd.isna(cur.get("pbr_pct")) else float(cur["pbr_pct"]),
-        "성과": {k: {kk: round(float(vv), 3) for kk, vv in v.items()} for k, v in perf.items()},
-        "매매횟수": int(len(trades)),
+        "목표비중": float(cur["코스피비중"]),
+        "현재비중": float(st["코스피비중"]),
+        "레버리지목표": float(cur["레버리지비중"]),
+        "주문": order,
+        "체결일": "다음 화요일 종가" if order else None,
+        "가드": bool(cur["가드"]),
+        "급락매수": bool(cur["급락매수"]),
+        "구성": {c: float(cur[c]) for c in comp if pd.notna(cur[c])},
+        "성과": perf,
     }
     (DATA / "latest_signal.json").write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
-    trades.to_csv(DATA / "trades.csv", index=False, encoding="utf-8-sig")
-    log.info("최신 신호: %s", out)
+    log.info("신호 %s", out)
     return out
 
 
