@@ -89,9 +89,15 @@ def compute_index(daily, p=P):
     lev_add = add / p["dip_add"] * p["lev_dip_add"]
     out["레버리지목표"] = _round_step((lev + lev_add).clip(0, p["max_lev"]), p)
 
-    # 실제로 유지하는 포지션: 화요일에만, 10%p 이상 차이날 때만 조정
-    out["코스피포지션"] = _applied(out["코스피목표"], p)
-    out["레버리지포지션"] = _applied(out["레버리지목표"], p)
+    # 실제 유지 포지션 — 두 가지 운용 방식
+    #  Daily : 매일 반영 (전일 신호 → 당일 종가)
+    #  Weekly: 월요일 신호 → 화요일 종가, 그 주 내내 유지
+    out["1배_Daily"] = _applied(out["코스피목표"], p, "daily")
+    out["2배_Daily"] = _applied(out["레버리지목표"], p, "daily")
+    out["1배_Weekly"] = _applied(out["코스피목표"], p, "tue")
+    out["2배_Weekly"] = _applied(out["레버리지목표"], p, "tue")
+    out["코스피포지션"] = out["1배_Daily"]          # 하위호환
+    out["레버리지포지션"] = out["2배_Daily"]
     return out
 
 
