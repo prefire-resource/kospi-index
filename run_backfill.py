@@ -4,14 +4,15 @@ from __future__ import annotations
 import sys
 import traceback
 
-from collectors import kofia, krx
+from collectors import fx, kofia, krx
 from notify.telegram import send
 
 if __name__ == "__main__":
     start = sys.argv[1] if len(sys.argv) > 1 else "20080101"
     done, fail = [], []
     for name, fn in [("KRX", lambda: krx.run(start)),
-                     ("금투협", lambda: kofia.run(start))]:
+                     ("금투협", lambda: kofia.run(start)),
+                     ("환율", lambda: fx.run(start))]:
         try:
             fn(); done.append(name)
         except Exception as e:
