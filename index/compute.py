@@ -1,13 +1,10 @@
 """수집된 CSV를 합쳐 지수와 주문을 만든다.
 
-체결 규칙: 월요일 마감 신호 → 화요일 종가 매매 (매수 시점 통일)
-  월요일 저녁  : 주문 안내 (기준금액의 몇 % 매수 / 보유금액의 몇 % 매도)
-  화요일 저녁  : 체결된 것으로 보고 보유 비중 갱신
-  그 외 요일   : 지수만 참고용으로 통지
+포지션 방식: 총자산(주식 평가액 + 현금) 대비 몇 %를 들고 있어야 하는지를 알려준다.
+  월요일 마감 신호 → 화요일 종가에 그 비중으로 맞춘다 (10%p 미만 변화는 건너뜀)
 
 출력
-  data/daily_index.csv     일별 지수·구성요소·목표비중
-  data/position.json       현재 보유 비중과 대기 주문
+  data/daily_index.csv     일별 지수·구성요소·목표/현재 포지션
   data/latest_signal.json  최신 신호 요약
 """
 from __future__ import annotations
@@ -17,10 +14,7 @@ import json
 import pandas as pd
 
 from collectors.common import DATA, load_csv, log
-from index.model import compute_index, backtest, stats, make_order, P
-
-STATE = DATA / "position.json"
-
+from index.model import compute_index, backtest, stats
 
 def build_daily() -> pd.DataFrame:
     idx = load_csv("kospi_index.csv")
@@ -46,53 +40,33 @@ def build_daily() -> pd.DataFrame:
     return d
 
 
-def _state() -> dict:
-    if STATE.exists():
-        return json.loads(STATE.read_text(encoding="utf-8"))
-    return {"코스피비중": 0.0, "레버리지비중": 0.0, "대기주문": None}
-
-
 def run(today: pd.Timestamp | None = None) -> dict:
     daily = build_daily()
     idx = compute_index(daily)
     idx.to_csv(DATA / "daily_index.csv", encoding="utf-8-sig")
 
-    start = idx["코스피비중"].dropna().index[0]
+    start = idx["코스피포지션"].replace(0, pd.NA).dropna().index[0]
     perf = {}
-    ret, held = backtest(daily, idx, column="코스피비중")
-    perf["코스피 1배"] = {k: round(float(v), 3) for k, v in stats(ret[start:], held[start:]).items()}
+    r1, h1 = backtest(daily, idx, "코스피포지션")
+    perf["1배 포지션"] = {k: round(float(v), 3) for k, v in stats(r1[start:], h1[start:]).items()}
+    r2, h2 = backtest(daily, idx, "레버리지포지션", multiplier=2.0, leveraged=True)
+    perf["2배 포지션"] = {k: round(float(v), 3) for k, v in stats(r2[start:], h2[start:]).items()}
     bh = daily["close"].pct_change().fillna(0)
     perf["단순보유"] = {k: round(float(v), 3) for k, v in stats(bh[start:]).items()}
 
-    cur = idx.dropna(subset=["코스피비중"]).iloc[-1]
-    sig_date = idx.dropna(subset=["코스피비중"]).index[-1]
+    cur = idx.iloc[-1]
     today = today or pd.Timestamp.today().normalize()
-    st = _state()
-
-    # 화요일이면 전날(월) 주문이 오늘 종가에 체결된 것으로 처리
-    if today.dayofweek == 1 and st.get("대기주문"):
-        st["코스피비중"] = st["대기주문"]["목표비중"]
-        st["레버리지비중"] = st["대기주문"].get("레버리지목표", st.get("레버리지비중", 0.0))
-        st["대기주문"] = None
-
-    order = None
-    if today.dayofweek == 0:                       # 월요일 저녁: 내일 화요일 종가 주문
-        order = make_order(float(cur["코스피비중"]), float(st["코스피비중"]))
-        order["레버리지목표"] = float(cur["레버리지비중"])
-        st["대기주문"] = None if order["동작"] in ("유지", "관망") else order
-
-    STATE.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
-
     comp = [c for c in ["기관수급", "외인수급", "신용부담", "증시연료", "패닉", "밸류", "환율"] if c in idx.columns]
     out = {
-        "기준일": str(sig_date.date()),
+        "기준일": str(idx.index[-1].date()),
         "종가": round(float(cur["close"]), 2),
         "지수": float(cur["index"]),
-        "목표비중": float(cur["코스피비중"]),
-        "현재비중": float(st["코스피비중"]),
-        "레버리지목표": float(cur["레버리지비중"]),
-        "주문": order,
-        "체결일": "다음 화요일 종가" if order else None,
+        "현재포지션_1배": float(cur["코스피포지션"]),
+        "현재포지션_2배": float(cur["레버리지포지션"]),
+        "다음조정_1배": float(cur["코스피목표"]),
+        "다음조정_2배": float(cur["레버리지목표"]),
+        "조정일": "다음 화요일 종가",
+        "월요일": today.dayofweek == 0,
         "가드": bool(cur["가드"]),
         "급락매수": bool(cur["급락매수"]),
         "구성": {c: float(cur[c]) for c in comp if pd.notna(cur[c])},
