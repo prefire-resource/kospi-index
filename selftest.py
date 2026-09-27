@@ -38,6 +38,14 @@ def naver():
     return f"{len(df)}행, 최신 {df['date'].max().date()}"
 
 
+def fxrate():
+    from collectors.fx import collect
+    start = (pd.Timestamp.today() - pd.Timedelta(days=20)).strftime("%Y-%m-%d")
+    df = collect(start)
+    assert len(df), "빈 응답"
+    return f"{len(df)}행, 최신 {df['date'].max().date()} = {df['usdkrw'].iloc[-1]:.1f}원"
+
+
 def kofia():
     from collectors.kofia import collect
     start = (pd.Timestamp.today() - pd.Timedelta(days=20)).strftime("%Y%m%d")
@@ -59,6 +67,7 @@ if __name__ == "__main__":
     try_step("KRX(pykrx)", krx)
     try_step("네이버 금융", naver)
     try_step("금융투자협회", kofia)
+    try_step("환율(Frankfurter)", fxrate)
     print("\n[네이버 주소 후보 점검]")
     try:
         from probe_naver import CANDIDATES, probe
