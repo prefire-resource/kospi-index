@@ -46,11 +46,26 @@ def kofia():
     return f"{len(df)}행, 최신 {df['date'].max().date()}"
 
 
+def secrets_status() -> str:
+    out = []
+    for k in ["KRX_ID", "KRX_PW", "TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID"]:
+        v = (os.environ.get(k) or "").strip()
+        out.append(f"{k}={'설정됨(%d자)' % len(v) if v else '비어 있음'}")
+    return " / ".join(out)
+
+
 if __name__ == "__main__":
-    print("KRX 로그인 정보:", "있음" if os.environ.get("KRX_ID") else "없음")
+    print("[Secrets]", secrets_status())
     try_step("KRX(pykrx)", krx)
     try_step("네이버 금융", naver)
     try_step("금융투자협회", kofia)
-    msg = "[접속 테스트]\n" + "\n".join(RESULTS)
+    print("\n[네이버 주소 후보 점검]")
+    try:
+        from probe_naver import CANDIDATES, probe
+        for nm, u in CANDIDATES:
+            print(probe(nm, u))
+    except Exception as e:
+        print("주소 점검 실패:", e)
+    msg = "[접속 테스트]\n" + "\n".join(RESULTS) + "\n" + secrets_status()
     print(msg)
     send(msg)
