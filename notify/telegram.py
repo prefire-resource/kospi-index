@@ -22,11 +22,17 @@ def send(text: str) -> bool:
 
 def format_signal(s: dict) -> str:
     comp = " ".join(f"{k} {v:+.1f}" for k, v in s.get("구성", {}).items())
-    pbr = f"\nPBR {s['PBR']:.2f}" + (f" (상위 {100 - s['PBR백분위'] * 100:.0f}%)" if s.get("PBR백분위") is not None else "") if s.get("PBR") else ""
-    return (f"[코스피 주간지수] {s['기준일']} 마감\n"
-            f"지수 {s['지수']:+.2f} → {s['신호']}\n"
-            f"종가 {s['종가']:,.2f} / 가드 {s['가드']}\n"
-            f"{comp}{pbr}")
+    tags = ("· 하락가드 " if s.get("가드") else "") + ("· 급락매수 " if s.get("급락매수") else "")
+    head = (f"[코스피 지수] {s['기준일']} 마감\n"
+            f"지수 {s['지수']:+.2f} / 종가 {s['종가']:,.2f} {tags}\n"
+            f"목표 {s['목표비중']:.0%} · 현재 {s['현재비중']:.0%}")
+    o = s.get("주문")
+    if not o:
+        return f"{head}\n(주문 안내는 월요일 마감 후)\n{comp}"
+    body = f"\n■ 화요일 종가 주문: {o['설명']}"
+    if s.get("레버리지목표", 0) > 0:
+        body += f"\n■ 레버리지 ETF 목표 {s['레버리지목표']:.0%}"
+    return f"{head}{body}\n{comp}"
 
 
 if __name__ == "__main__":
