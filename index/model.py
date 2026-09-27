@@ -18,9 +18,11 @@ P = dict(
     pct_win=1250, pct_min=250,      # 밸류 백분위 5년 창
     weights=dict(기관수급=.25, 외인수급=.05, 신용부담=.25, 증시연료=.15,
                  패닉=.20, 밸류=.05, 환율=.05),
-    base=0.8, tilt=3.0, max_1x=1.2, smooth=5,   # 비중 = base + tilt*지수/10, 상한 120%
-    step=0.10, band=0.10,                       # 10% 단위로 반올림, 10%p 미만 변화는 매매 안 함
-    lev_from=0.8, lev_full=1.2,                 # 목표 80%→레버리지 0%, 120%→100%
+    # 1배 포지션 = base + tilt*지수/10 (총자산 대비, 0~100%)
+    base=0.9, tilt=3.0, max_1x=1.0, smooth=5,
+    # 2배(레버리지 ETF) 포지션 = lev_base + lev_tilt*지수/10 (총자산 대비, 0~100%)
+    lev_base=0.5, lev_tilt=3.0, max_lev=1.0, lev_dip_add=0.20,
+    step=0.10, band=0.10,                       # 10% 단위, 10%p 미만 변화는 조정하지 않음
     guard_dd=-0.08, guard_vol=1.8, guard_exposure=0.30,
     dip_ret=-0.04, dip_vol=1.2, dip_add=0.30, dip_days=5,
     cost=0.0015, lev_fee=0.01 / 252,
@@ -80,11 +82,55 @@ def compute_index(daily, p=P):
     out["index"] = ix.round(2)
     out["가드"] = guard
     out["급락매수"] = add > 0
-    tgt = (base + add).clip(0, p["max_1x"])
-    out["코스피비중"] = ((tgt / p["step"]).round() * p["step"]).round(2)          # 기준금액 대비 목표 (0~120%)
-    lev = ((out["코스피비중"] - p["lev_from"]) / (p["lev_full"] - p["lev_from"])).clip(0, 1)
-    out["레버리지비중"] = ((lev / p["step"]).round() * p["step"]).round(2)         # 레버리지 ETF 기준금액 대비
+    out["코스피목표"] = _round_step((base + add).clip(0, p["max_1x"]), p)
+
+    lev = (p["lev_base"] + p["lev_tilt"] * ix / 10).clip(0, p["max_lev"]).where(~guard, 0.0)
+    lev = lev.rolling(p["smooth"]).mean()
+    lev_add = add / p["dip_add"] * p["lev_dip_add"]
+    out["레버리지목표"] = _round_step((lev + lev_add).clip(0, p["max_lev"]), p)
+
+    # 실제로 유지하는 포지션: 화요일에만, 10%p 이상 차이날 때만 조정
+    out["코스피포지션"] = _applied(out["코스피목표"], p)
+    out["레버리지포지션"] = _applied(out["레버리지목표"], p)
     return out
+
+
+def _round_step(s, p=P):
+    return ((s / p["step"]).round() * p["step"]).round(2)
+
+
+def _applied(target, p=P, cadence="tue"):
+    """월요일 마감 신호를 화요일 종가에 반영. 10%p 미만 변화는 건너뛴다."""
+    dates = target.index
+    cur, vals = 0.0, []
+    for i, dt in enumerate(dates):
+        if i:
+            prev = target.iloc[i - 1]
+            trade = True if cadence == "daily" else (
+                dt.dayofweek == 1 or (dt.dayofweek > 1 and dates[i - 1].dayofweek > dt.dayofweek))
+            if trade and not np.isnan(prev) and abs(prev - cur) >= p["band"] - 1e-9:
+                cur = float(prev)
+        vals.append(cur)
+    return pd.Series(vals, index=dates).round(2)
+
+
+def _round_step(s, p=P):
+    return ((s / p["step"]).round() * p["step"]).round(2)
+
+
+def _applied(target, p=P, cadence="tue"):
+    """월요일 마감 신호를 화요일 종가에 반영. 10%p 미만 변화는 건너뛴다."""
+    dates = target.index
+    cur, vals = 0.0, []
+    for i, dt in enumerate(dates):
+        if i:
+            prev = target.iloc[i - 1]
+            trade = True if cadence == "daily" else (
+                dt.dayofweek == 1 or (dt.dayofweek > 1 and dates[i - 1].dayofweek > dt.dayofweek))
+            if trade and not np.isnan(prev) and abs(prev - cur) >= p["band"] - 1e-9:
+                cur = float(prev)
+        vals.append(cur)
+    return pd.Series(vals, index=dates).round(2)
 
 
 def make_order(target: float, current: float, p=P) -> dict:
@@ -106,26 +152,16 @@ def make_order(target: float, current: float, p=P) -> dict:
             "설명": f"보유금액의 {share:.0%} 매도 → 누적 {target:.0%}"}
 
 
-def backtest(daily, idx, column="코스피비중", leveraged=False, p=P, cadence="tue"):
-    """cadence="tue": 월요일 신호를 화요일 종가에 체결 (실제 운용 규칙)
-       cadence="daily": 매일 체결"""
+def backtest(daily, idx, column="코스피포지션", multiplier=1.0, leveraged=False, p=P, cash_rate=0.0):
+    """포지션 = 총자산 대비 비중. multiplier=2 면 2배 ETF (시장 노출 2배)."""
     close = daily["close"]
-    sig = idx[column].reindex(close.index)
-    dates = close.index
-    pos = pd.Series(np.nan, index=dates)
-    cur = 0.0
-    for i, dt in enumerate(dates):
-        if i:
-            s_prev = sig.iloc[i - 1]
-            trade = True if cadence == "daily" else (
-                dt.dayofweek == 1 or (dt.dayofweek > 1 and dates[i - 1].dayofweek > dt.dayofweek))
-            if trade and not np.isnan(s_prev) and abs(s_prev - cur) >= p["band"] - 1e-9:
-                cur = float(s_prev)
-        pos.iloc[i] = cur
+    pos = idx[column].reindex(close.index).ffill().fillna(0.0)
     held = pos.shift(1).fillna(0.0)
-    ret = held * close.pct_change().fillna(0) - pos.diff().abs().fillna(0) * p["cost"]
+    ret = (held * multiplier * close.pct_change().fillna(0)
+           + (1 - held) * cash_rate / 252
+           - pos.diff().abs().fillna(0) * multiplier * p["cost"])
     if leveraged:
-        ret = ret - held.abs() * p["lev_fee"]
+        ret = ret - held * abs(multiplier) * p["lev_fee"]
     return ret, held
 
 
