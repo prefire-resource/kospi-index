@@ -29,6 +29,14 @@ if __name__ == "__main__":
         from notify.telegram import format_signal
         sig = compute_run()
         send(format_signal(sig))
+        try:
+            from notify.chart import make
+            from notify.telegram import send_photo
+            p = make(30)
+            if p:
+                send_photo(p, f"시그널 지표 추이 ({sig['기준일']} 기준)")
+        except Exception as e:
+            print("차트 생성 건너뜀:", e)
     except Exception as e:
         FAIL.append(f"지수계산: {type(e).__name__} {str(e)[:150]}")
         traceback.print_exc()
