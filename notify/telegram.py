@@ -6,6 +6,7 @@ import os
 import requests
 
 API = "https://api.telegram.org/bot{token}/sendMessage"
+PHOTO_API = "https://api.telegram.org/bot{token}/sendPhoto"
 
 
 def send(text: str) -> bool:
@@ -18,6 +19,19 @@ def send(text: str) -> bool:
                             "disable_web_page_preview": True})
     ok = r.ok and r.json().get("ok", False)
     print("텔레그램 발송", "성공" if ok else f"실패: {r.text[:200]}")
+    return ok
+
+
+def send_photo(path, caption: str = "") -> bool:
+    token, chat = os.environ.get("TELEGRAM_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat or not path:
+        return False
+    with open(path, "rb") as f:
+        r = requests.post(PHOTO_API.format(token=token), timeout=30,
+                          data={"chat_id": chat, "caption": caption[:1000], "parse_mode": "HTML"},
+                          files={"photo": f})
+    ok = r.ok and r.json().get("ok", False)
+    print("차트 발송", "성공" if ok else f"실패: {r.text[:200]}")
     return ok
 
 
