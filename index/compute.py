@@ -18,6 +18,7 @@ import pandas as pd
 
 from collectors.common import DATA, load_csv, log
 from index.model import compute_index, backtest, stats
+from index import model_v2
 
 COMP = ["기관수급", "외인수급", "신용부담", "증시연료", "패닉", "밸류", "환율"]
 LABEL = {"기관수급": "기관 수급", "외인수급": "외국인 수급", "신용부담": "신용/예탁금",
@@ -67,6 +68,10 @@ def run(today: pd.Timestamp | None = None) -> dict:
     idx = compute_index(daily)
     idx.to_csv(DATA / "daily_index.csv", encoding="utf-8-sig")
 
+    # 수정판(v5) 병행 산출 — 기록만 남기고 운용은 각자 선택
+    idx2 = model_v2.compute_index(daily)
+    idx2.to_csv(DATA / "daily_index_v2.csv", encoding="utf-8-sig")
+
     # 모든 구성요소의 정규화 창이 채워진 뒤부터 성과를 집계한다
     first = idx["1배_Daily"].replace(0, pd.NA).dropna().index[0]
     start = max(first, pd.Timestamp("2010-01-01"))
@@ -99,6 +104,12 @@ def run(today: pd.Timestamp | None = None) -> dict:
                         encoding="utf-8")
 
     cur, prev = idx.iloc[-1], idx.iloc[-2]
+    cur2, prev2 = idx2.iloc[-1], idx2.iloc[-2]
+    start2 = idx2["1배_Daily"].replace(0, pd.NA).dropna().index[0]
+    start2 = max(start2, pd.Timestamp("2010-01-01"))
+    for name, col, mult, lev in STRATS:
+        ret2, held2 = model_v2.backtest(daily, idx2, column=col, multiplier=mult, leveraged=lev)
+        perf["수정판 " + name] = _summary(ret2, held2, start2)
     today = today or pd.Timestamp.today().normalize()
     chg = float(daily["close"].pct_change().iloc[-1])
     out = {
@@ -116,6 +127,15 @@ def run(today: pd.Timestamp | None = None) -> dict:
         "가드": bool(cur["가드"]),
         "급락매수": bool(cur["급락매수"]),
         "구성": {LABEL[c]: round(float(cur[c]), 1) for c in COMP if c in idx.columns and pd.notna(cur[c])},
+        "수정판": {
+            "지표": float(cur2["index"]),
+            "지표변화": round(float(cur2["index"]) - float(prev2["index"]), 2),
+            "1배": float(cur2["1배_Daily"]),
+            "2배": float(cur2["2배_Daily"]),
+            "직전_1배": float(prev2["1배_Daily"]),
+            "직전_2배": float(prev2["2배_Daily"]),
+            "구성": {LABEL[c]: round(float(cur2[c]), 1) for c in COMP if c in idx2.columns and pd.notna(cur2[c])},
+        },
         "성과": perf,
         "실전": live,
         "검증기간": f"{start.date()} ~ {idx.index[-1].date()}",
