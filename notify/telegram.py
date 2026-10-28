@@ -101,6 +101,14 @@ def format_signal(s: dict) -> str:
 
     lines += ["", "<b>지표 구성</b>", comp]
 
+    v5 = s.get("수정판")
+    if v5:
+        lines += [
+            "",
+            f"<b>［수정판 v5 참고］</b>  지표 {v5['지표']:+.2f} ({v5['지표변화']:+.2f})",
+            f"  1배 {_change(v5['직전_1배'], v5['1배'])}  ·  2배 {_change(v5['직전_2배'], v5['2배'])}",
+        ]
+
     live = s.get("실전")
     if live:
         lines += [
