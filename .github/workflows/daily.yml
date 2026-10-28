@@ -1,7 +1,9 @@
 name: daily
 on:
   schedule:
-    - cron: "0 12 * * 1-5"   # UTC 12:00 = KST 21:00 (평일)
+    # GitHub 예약 실행은 정각에 몰려 지연·누락이 잦다. 분을 비껴가고 백업 실행을 둔다.
+    - cron: "17 12 * * 1-5"   # UTC 12:17 = KST 21:17 (1차)
+    - cron: "3 14 * * 1-5"    # UTC 14:03 = KST 23:03 (백업, 이미 보냈으면 알림 생략)
   workflow_dispatch:
 jobs:
   collect:
@@ -33,4 +35,5 @@ jobs:
           git config user.email "actions@github.com"
           git add data
           git commit -m "data: $(date -u +%Y-%m-%d)" || echo "변경 없음"
+          git pull --rebase -q || true
           git push
